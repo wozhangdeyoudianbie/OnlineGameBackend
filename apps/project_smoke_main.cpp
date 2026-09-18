@@ -2,6 +2,6 @@
 
 int main()
 {
-    std::cout << "OnlineGameBackend project skeleton is running\n";
+    std::cout << "OnlineGameBackend 工程骨架运行正常\n";
     return 0;
 }

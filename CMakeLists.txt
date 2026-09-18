@@ -8,42 +8,37 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(online_game_backend_project_options INTERFACE)
 
-target_compile_options(
-    online_game_backend_project_options
-    INTERFACE
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Werror
-)
+target_compile_options(online_game_backend_project_options INTERFACE -Wall -Wextra -Wpedantic -Werror)
 
-add_executable(
-    online_game_backend_smoke
-    apps/project_smoke_main.cpp
-)
+find_path(MYSQL_INCLUDE_DIR NAMES mysql.h PATH_SUFFIXES mysql REQUIRED)
 
-target_link_libraries(
-    online_game_backend_smoke
-    PRIVATE
-    online_game_backend_project_options
-)
+find_library(MYSQLCLIENT_LIBRARY NAMES mysqlclient REQUIRED)
+
+add_library(online_game_backend_mysql INTERFACE)
+
+target_include_directories(online_game_backend_mysql SYSTEM INTERFACE "${MYSQL_INCLUDE_DIR}")
+
+target_link_libraries(online_game_backend_mysql INTERFACE "${MYSQLCLIENT_LIBRARY}")
+
+add_executable(online_game_backend_smoke apps/project_smoke_main.cpp)
+
+target_link_libraries(online_game_backend_smoke PRIVATE online_game_backend_project_options)
+
+add_executable(online_game_backend_match_lookup apps/match_lookup_main.cpp)
+
+target_link_libraries(online_game_backend_match_lookup PRIVATE online_game_backend_project_options online_game_backend_mysql)
+
+add_executable(online_game_backend_match_id_lookup apps/match_id_lookup_main.cpp)
+
+target_link_libraries(online_game_backend_match_id_lookup PRIVATE online_game_backend_project_options online_game_backend_mysql)
 
 include(CTest)
 
 if(BUILD_TESTING)
     find_package(GTest REQUIRED)
 
-    add_executable(
-        online_game_backend_smoke_test
-        tests/project_smoke_test.cpp
-    )
-
-    target_link_libraries(
-        online_game_backend_smoke_test
-        PRIVATE
-        online_game_backend_project_options
-        GTest::gtest_main
-    )
+    add_executable(online_game_backend_smoke_test tests/project_smoke_test.cpp)
+    target_link_libraries(online_game_backend_smoke_test PRIVATE online_game_backend_project_options GTest::gtest_main)
 
     include(GoogleTest)
     gtest_discover_tests(online_game_backend_smoke_test)
