@@ -1,0 +1,93 @@
+Reading table information for completion of table and column names
+You can turn off this feature to get a quicker startup with -A
+
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 2295
+Server version: 8.0.46 MySQL Community Server - GPL
+
+Copyright (c) 2000, 2026, Oracle and/or its affiliates.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> SELECT
+    ->     VERSION() AS mysql_version,
+    ->     DATABASE() AS database_name;
++---------------+------------------------------------+
+| mysql_version | database_name                      |
++---------------+------------------------------------+
+| 8.0.46        | online_game_backend_migration_test |
++---------------+------------------------------------+
+1 row in set (0.00 sec)
+
+mysql>
+mysql> SELECT
+    ->     COUNT(*) AS history_count
+    -> FROM match_players
+    -> WHERE player_id = 930000001;
++---------------+
+| history_count |
++---------------+
+|             3 |
++---------------+
+1 row in set (0.00 sec)
+
+mysql>
+mysql> SHOW INDEX FROM match_players;
++---------------+------------+---------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table         | Non_unique | Key_name            | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++---------------+------------+---------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| match_players |          0 | PRIMARY             |            1 | match_id    | A         |           0 |     NULL |   NULL |      | BTREE      |         |               | YES     | NULL       |
+| match_players |          0 | PRIMARY             |            2 | player_id   | A         |           0 |     NULL |   NULL |      | BTREE      |         |               | YES     | NULL       |
+| match_players |          1 | index_match_players |            1 | player_id   | A         |           0 |     NULL |   NULL |      | BTREE      |         |               | YES     | NULL       |
+| match_players |          1 | index_match_players |            2 | match_id    | A         |           0 |     NULL |   NULL |      | BTREE      |         |               | YES     | NULL       |
++---------------+------------+---------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+4 rows in set (0.00 sec)
+
+mysql>
+mysql> EXPLAIN
+    -> SELECT
+    ->     m.match_id,
+    ->     m.state,
+    ->     m.created_at,
+    ->     m.completed_at
+    -> FROM match_players AS mp
+    -> JOIN matches AS m
+    ->     ON m.match_id = mp.match_id
+    -> WHERE mp.player_id = 930000001
+    -> ORDER BY m.created_at DESC
+    -> LIMIT 20;
++----+-------------+-------+------------+--------+-----------------------------+---------------------+---------+------------------------------------------------+------+----------+----------------------------------------------+
+| id | select_type | table | partitions | type   | possible_keys               | key                 | key_len | ref                                            | rows | filtered | Extra                                        |
++----+-------------+-------+------------+--------+-----------------------------+---------------------+---------+------------------------------------------------+------+----------+----------------------------------------------+
+|  1 | SIMPLE      | mp    | NULL       | ref    | PRIMARY,index_match_players | index_match_players | 8       | const                                          |    3 |   100.00 | Using index; Using temporary; Using filesort |
+|  1 | SIMPLE      | m     | NULL       | eq_ref | PRIMARY                     | PRIMARY             | 66      | online_game_backend_migration_test.mp.match_id |    1 |   100.00 | NULL                                         |
++----+-------------+-------+------------+--------+-----------------------------+---------------------+---------+------------------------------------------------+------+----------+----------------------------------------------+
+2 rows in set, 1 warning (0.00 sec)
+
+mysql>
+mysql> SELECT
+    ->     CONVERT(m.match_id USING utf8mb4) AS match_id,
+    ->     m.state,
+    ->     m.created_at,
+    ->     m.completed_at
+    -> FROM match_players AS mp
+    -> JOIN matches AS m
+    ->     ON m.match_id = mp.match_id
+    -> WHERE mp.player_id = 930000001
+    -> ORDER BY m.created_at DESC
+    -> LIMIT 20;
++--------------------+-------+----------------------------+----------------------------+
+| match_id           | state | created_at                 | completed_at               |
++--------------------+-------+----------------------------+----------------------------+
+| M_DAY3_HISTORY_003 |     1 | 2026-09-18 11:00:00.000000 | 2026-09-18 11:30:00.000000 |
+| M_DAY3_HISTORY_002 |     1 | 2026-09-18 10:00:00.000000 | 2026-09-18 10:25:00.000000 |
+| M_DAY3_HISTORY_001 |     1 | 2026-09-18 09:00:00.000000 | 2026-09-18 09:20:00.000000 |
++--------------------+-------+----------------------------+----------------------------+
+3 rows in set (0.00 sec)
+
+mysql>
+mysql> exit
