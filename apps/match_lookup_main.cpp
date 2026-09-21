@@ -1,3 +1,4 @@
+#include "storage/mysql_RAII.h"
 #include <mysql.h>
 #include <array>
 #include <cstdlib>
@@ -12,32 +13,24 @@ namespace
     constexpr const char *kDefaultDatabaseName = "online_game_backend";
     constexpr unsigned int kDatabasePort = 13306U;
     constexpr const char *kLookupSql = "SELECT match_id, state FROM matches WHERE create_request_id = ?";
-    bool close_statement(MYSQL *connection, MYSQL_STMT *statement)
+    int statement_failure(MYSQL_STMT *statement, const char *operation)
     {
-        if (mysql_stmt_close(statement) == 0)
-        {
-            return true;
-        }
-        std::cerr << "[错误] 关闭MySQL预处理语句失败：" << mysql_error(connection) << '\n';
-        return false;
-    }
-    int statement_failure(MYSQL *connection, MYSQL_STMT *statement, const char *operation)
-    {
-        std::cerr << "[错误] " << operation << "失败：" << mysql_stmt_error(statement) << '\n';
-        close_statement(connection, statement);
+        const std::string error_message = mysql_stmt_error(statement);
+        std::cerr << "[错误] " << operation << "失败：" << error_message << '\n';
         return 1;
     }
     int lookup_match(MYSQL *connection, const std::string &create_request_id)
     {
-        MYSQL_STMT *statement = mysql_stmt_init(connection);
-        if (statement == nullptr)
+        MYSQL_STMT *raw_statement = mysql_stmt_init(connection);
+        if (raw_statement == nullptr)
         {
             std::cerr << "[错误] 初始化MySQL预处理语句失败：" << mysql_error(connection) << '\n';
             return 1;
         }
-        if (mysql_stmt_prepare(statement, kLookupSql, static_cast<unsigned long>(std::strlen(kLookupSql))) != 0)
+        MysqlStatement statement(raw_statement);
+        if (mysql_stmt_prepare(statement.get(), kLookupSql, static_cast<unsigned long>(std::strlen(kLookupSql))) != 0)
         {
-            return statement_failure(connection, statement, "准备预处理语句");
+            return statement_failure(statement.get(), "准备预处理语句");
         }
         std::string request_storage = create_request_id;
         unsigned long request_length = static_cast<unsigned long>(request_storage.size());
@@ -46,13 +39,13 @@ namespace
         parameter_bind[0].buffer = request_storage.data();
         parameter_bind[0].buffer_length = request_length;
         parameter_bind[0].length = &request_length;
-        if (mysql_stmt_bind_param(statement, parameter_bind) != 0)
+        if (mysql_stmt_bind_param(statement.get(), parameter_bind) != 0)
         {
-            return statement_failure(connection, statement, "绑定查询参数");
+            return statement_failure(statement.get(), "绑定查询参数");
         }
-        if (mysql_stmt_execute(statement) != 0)
+        if (mysql_stmt_execute(statement.get()) != 0)
         {
-            return statement_failure(connection, statement, "执行查询");
+            return statement_failure(statement.get(), "执行查询");
         }
         std::array<char, 64> match_id{};
         unsigned long match_id_length = 0;
@@ -73,11 +66,11 @@ namespace
         result_bind[1].is_unsigned = true;
         result_bind[1].is_null = &state_is_null;
         result_bind[1].error = &state_error;
-        if (mysql_stmt_bind_result(statement, result_bind) != 0)
+        if (mysql_stmt_bind_result(statement.get(), result_bind) != 0)
         {
-            return statement_failure(connection, statement, "绑定查询结果");
+            return statement_failure(statement.get(), "绑定查询结果");
         }
-        const int fetch_status = mysql_stmt_fetch(statement);
+        const int fetch_status = mysql_stmt_fetch(statement.get());
         int result = 0;
         if (fetch_status == MYSQL_NO_DATA)
         {
@@ -90,7 +83,7 @@ namespace
         }
         else if (fetch_status != 0)
         {
-            return statement_failure(connection, statement, "读取查询结果");
+            return statement_failure(statement.get(), "读取查询结果");
         }
         else if (match_id_is_null || state_is_null || match_id_error || state_error || match_id_length > match_id.size())
         {
@@ -100,14 +93,33 @@ namespace
         else
         {
             const std::string match_id_value(match_id.data(), static_cast<std::size_t>(match_id_length));
-
             std::cout << "[找到] 对局ID=" << match_id_value << " 状态=" << static_cast<unsigned int>(state) << '\n';
         }
-        if (!close_statement(connection, statement))
+        return result;
+    }
+    int run_lookup(const char *database_password, const char *database_name, const std::string &create_request_id)
+    {
+        MYSQL *raw_connection = mysql_init(nullptr);
+        if (raw_connection == nullptr)
         {
+            std::cerr << "[错误] 初始化MySQL连接失败\n";
             return 1;
         }
-        return result;
+        MysqlConnection connection(raw_connection);
+        unsigned int connect_timeout_seconds = 5U;
+        if (mysql_options(connection.get(), MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout_seconds) != 0)
+        {
+            const std::string error_message = mysql_error(connection.get());
+            std::cerr << "[错误] 设置MySQL连接超时失败：" << error_message << '\n';
+            return 1;
+        }
+        if (mysql_real_connect(connection.get(), kDatabaseHost, kDatabaseUser, database_password, database_name, kDatabasePort, nullptr, 0) == nullptr)
+        {
+            const std::string error_message = mysql_error(connection.get());
+            std::cerr << "[错误] 连接MySQL失败：" << error_message << '\n';
+            return 1;
+        }
+        return lookup_match(connection.get(), create_request_id);
     }
 }
 
@@ -134,30 +146,7 @@ int main(int argc, char *argv[])
         std::cerr << "[错误] 初始化MySQL客户端库失败\n";
         return 1;
     }
-    MYSQL *connection = mysql_init(nullptr);
-    if (connection == nullptr)
-    {
-        std::cerr << "[错误] 初始化MySQL连接失败\n";
-        mysql_library_end();
-        return 1;
-    }
-    unsigned int connect_timeout_seconds = 5U;
-    if (mysql_options(connection, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout_seconds) != 0)
-    {
-        std::cerr << "[错误] 设置MySQL连接超时失败：" << mysql_error(connection) << '\n';
-        mysql_close(connection);
-        mysql_library_end();
-        return 1;
-    }
-    if (mysql_real_connect(connection, kDatabaseHost, kDatabaseUser, database_password, database_name, kDatabasePort, nullptr, 0) == nullptr)
-    {
-        std::cerr << "[错误] 连接MySQL失败：" << mysql_error(connection) << '\n';
-        mysql_close(connection);
-        mysql_library_end();
-        return 1;
-    }
-    const int result = lookup_match(connection, argv[1]);
-    mysql_close(connection);
+    const int result = run_lookup(database_password, database_name, argv[1]);
     mysql_library_end();
     return result;
 }

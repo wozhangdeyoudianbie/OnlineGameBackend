@@ -20,13 +20,34 @@ target_include_directories(online_game_backend_mysql SYSTEM INTERFACE "${MYSQL_I
 
 target_link_libraries(online_game_backend_mysql INTERFACE "${MYSQLCLIENT_LIBRARY}")
 
+add_library(online_game_backend_storage STATIC
+    storage/mysql_RAII.cpp
+)
+
+target_include_directories(online_game_backend_storage
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_link_libraries(online_game_backend_storage
+    PUBLIC
+        online_game_backend_mysql
+    PRIVATE
+        online_game_backend_project_options
+)
+
 add_executable(online_game_backend_smoke apps/project_smoke_main.cpp)
 
 target_link_libraries(online_game_backend_smoke PRIVATE online_game_backend_project_options)
 
 add_executable(online_game_backend_match_lookup apps/match_lookup_main.cpp)
 
-target_link_libraries(online_game_backend_match_lookup PRIVATE online_game_backend_project_options online_game_backend_mysql)
+target_link_libraries(online_game_backend_match_lookup
+    PRIVATE
+        online_game_backend_project_options
+        online_game_backend_storage
+        online_game_backend_mysql
+)
 
 add_executable(online_game_backend_match_id_lookup apps/match_id_lookup_main.cpp)
 
