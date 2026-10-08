@@ -23,6 +23,7 @@ target_link_libraries(online_game_backend_mysql INTERFACE "${MYSQLCLIENT_LIBRARY
 add_library(online_game_backend_storage STATIC
     storage/mysql_RAII.cpp
     storage/player_repository.cpp
+    storage/settlement_repository.cpp
 )
 
 target_include_directories(online_game_backend_storage
@@ -75,4 +76,20 @@ if(BUILD_TESTING)
             GTest::gtest
     )
     gtest_discover_tests(online_game_backend_player_repository_test)
+
+    add_executable(online_game_backend_settlement_repository_test
+        tests/settlement_repository_test.cpp
+    )
+
+    target_link_libraries(
+        online_game_backend_settlement_repository_test
+        PRIVATE
+            online_game_backend_project_options
+            online_game_backend_storage
+            GTest::gtest
+    )
+
+    gtest_discover_tests(
+        online_game_backend_settlement_repository_test
+    )
 endif()

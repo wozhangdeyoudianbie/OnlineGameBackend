@@ -10,10 +10,14 @@
 namespace
 {
     constexpr const char *kInsertPlayerSql = "INSERT INTO players (player_id) VALUES (?)";
+
+    // 判断错误码是否为连接断开（服务端消失、连接丢失）。
     bool is_disconnect_error(unsigned int error_code) noexcept
     {
         return error_code == CR_SERVER_GONE_ERROR || error_code == CR_SERVER_LOST;
     }
+
+    // 从语句取出错误码与错误信息；断线归类为 ConnectionError，其余为 SqlError。
     RepositoryResult statement_failure(MYSQL_STMT *statement)
     {
         const unsigned int error_code = mysql_stmt_errno(statement);
@@ -34,10 +38,12 @@ namespace
 
 }
 
+// 只保存连接指针，不接管其所有权。
 PlayerRepository::PlayerRepository(MYSQL *connection) noexcept : connection_(connection)
 {
 }
 
+// 插入一名玩家；连接为空返回 ConnectionError，语句失败按错误码归类。
 RepositoryResult PlayerRepository::create_player(std::uint64_t player_id)
 {
 
@@ -71,6 +77,7 @@ RepositoryResult PlayerRepository::create_player(std::uint64_t player_id)
     return {RepositoryStates::Success, {}};
 }
 
+// 查询玩家概要：创建时间与当前在局分配的比赛 ID；玩家不存在返回 NotFound。
 PlayerSummaryResult PlayerRepository::get_player_summary(std::uint64_t player_id)
 {
     if (connection_ == nullptr)
@@ -172,6 +179,7 @@ PlayerSummaryResult PlayerRepository::get_player_summary(std::uint64_t player_id
     return {RepositoryStates::Success, summary, {}};
 }
 
+// 查询玩家最近 20 场对局，按创建时间倒序；没有对局时返回空列表。
 MatchHistoryResult PlayerRepository::get_match_history(std::uint64_t player_id)
 {
     if (connection_ == nullptr)

@@ -12,6 +12,7 @@ readonly db_user="${DB_USER:-p2}"
 readonly db_password="${DB_PASSWORD:-p2_dev}"
 readonly db_name="${DB_NAME:-online_game_backend}"
 
+# 以固定连接参数调用 mysql 客户端，其余参数原样透传。
 mysql_client() {
     MYSQL_PWD="${db_password}" mysql --protocol=TCP --host="${db_host}" --port="${db_port}" --user="${db_user}" --database="${db_name}" --connect-timeout=5 --batch --skip-column-names "$@"
 }
