@@ -644,5 +644,108 @@ SettlementRepository::SettlementRepository(MYSQL *connection) noexcept : connect
 // 按“校验 -> BEGIN -> 两次请求查询及各项锁定 -> 写入 -> COMMIT/ROLLBACK”实现。
 ReportMatchResultResult SettlementRepository::report_match_result(const ReportMatchResultRequest &request)
 {
-    return {SettlementStates::DataError, std::nullopt, {}};
+    if (!is_valid_request(request))
+    {
+        return {SettlementStates::InvalidRequest, std::nullopt, {}};
+    }
+    if (connection_ == nullptr)
+    {
+        return {SettlementStates::ConnectionError, std::nullopt, {}};
+    }
+    if (mysql_query(connection_, kStartTransactionSql) != 0)
+    {
+        const StepResult failure = connection_failure(connection_);
+        return {failure.state, std::nullopt, failure.error};
+    }
+    TransactionGuard transaction(connection_);
+    const RequestLookupResult first_request = find_request_for_update(connection_, request.request_id);
+    if (!first_request.step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {first_request.step.state, std::nullopt, first_request.step.error});
+    }
+    if (first_request.settlement.has_value())
+    {
+        if (same_payload(*first_request.settlement, request))
+        {
+            return rollback_and_return(transaction, connection_, {SettlementStates::Replayed, first_request.settlement, {}});
+        }
+        else
+        {
+            return rollback_and_return(transaction, connection_, {SettlementStates::RequestConflict, std::nullopt, {}});
+        }
+    }
+    const StepResult match_step = lock_open_match(connection_, request.match_id);
+    if (!match_step.ok() && match_step.state != SettlementStates::MatchAlreadySettled)
+    {
+        return rollback_and_return(transaction, connection_, {match_step.state, std::nullopt, match_step.error});
+    }
+    const RequestLookupResult second_request = find_request_for_update(connection_, request.request_id);
+    if (!second_request.step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {second_request.step.state, std::nullopt, second_request.step.error});
+    }
+    if (second_request.settlement.has_value())
+    {
+        if (same_payload(*second_request.settlement, request))
+        {
+            return rollback_and_return(transaction, connection_, {SettlementStates::Replayed, second_request.settlement, {}});
+        }
+        return rollback_and_return(transaction, connection_, {SettlementStates::RequestConflict, std::nullopt, {}});
+    }
+    if (match_step.state == SettlementStates::MatchAlreadySettled)
+    {
+        return rollback_and_return(transaction, connection_, {match_step.state, std::nullopt, match_step.error});
+    }
+    StepResult step = lock_and_validate_participants(connection_, request);
+    step = lock_and_validate_participants(connection_, request);
+    if (!step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
+    }
+    step = lock_players_in_order(connection_, request.loser_player_id, request.winner_player_id);
+    if (!step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
+    }
+    step = insert_result_request(connection_, request);
+    if (!step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
+    }
+    step = increment_winner(connection_, request.winner_player_id);
+    if (!step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
+    }
+    step = increment_loser(connection_, request.loser_player_id);
+    if (!step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
+    }
+    step = set_player_outcome(connection_, request.match_id, request.winner_player_id, 1);
+    if (!step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
+    }
+    step = set_player_outcome(connection_, request.match_id, request.loser_player_id, 2);
+    if (!step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
+    }
+    step = clear_active_assignments(connection_, request);
+    if (!step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
+    }
+    step = complete_match(connection_, request.match_id);
+    if (!step.ok())
+    {
+        return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
+    }
+    if (!transaction.commit())
+    {
+        return {SettlementStates::CommitOutcomeUnknown, std::nullopt, {mysql_errno(connection_), mysql_error(connection_)}};
+    }
+    MatchSettlement settlement{request.request_id, request.match_id, request.winner_player_id, request.loser_player_id};
+    return {SettlementStates::Success, settlement, {}};
 }
