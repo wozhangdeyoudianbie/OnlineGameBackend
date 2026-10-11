@@ -1,0 +1,36 @@
+20fd6ce82819231c92f5c846c2e238d8c3359051
+test_database=online_game_backend_gate1_20261011_140133_49355
+[初始化] 000_schema_migrations.sql
+[执行] 001_init.sql
+[完成] 001_init.sql
+[执行] 002_add_settlement_fields.sql
+[完成] 002_add_settlement_fields.sql
+[成功] 数据库迁移已是最新状态
+[初始化] 000_schema_migrations.sql
+[跳过] 001_init.sql
+[跳过] 002_add_settlement_fields.sql
+[成功] 数据库迁移已是最新状态
+Internal ctest changing into directory: /home/l/OnlineGameBackend/build
+Test project /home/l/OnlineGameBackend/build
+    Start 1: ProjectSmokeTest.UsesCpp17OrLater
+1/9 Test #1: ProjectSmokeTest.UsesCpp17OrLater .......................................................   Passed    0.00 sec
+    Start 2: PlayerRepositoryTest.NullConnection
+2/9 Test #2: PlayerRepositoryTest.NullConnection .....................................................   Passed    0.00 sec
+    Start 3: PlayerRepositoryTest.DatabaseRoundTrip
+3/9 Test #3: PlayerRepositoryTest.DatabaseRoundTrip ..................................................   Passed    0.03 sec
+    Start 4: PlayerRepositoryTest.DisconnectedConnection
+4/9 Test #4: PlayerRepositoryTest.DisconnectedConnection .............................................   Passed    0.04 sec
+    Start 5: SettlementRepositoryTest.NullConnection
+5/9 Test #5: SettlementRepositoryTest.NullConnection .................................................   Passed    0.00 sec
+    Start 6: SettlementRepositoryTest.DatabaseRoundTripEnforcesIdempotentSettlement
+6/9 Test #6: SettlementRepositoryTest.DatabaseRoundTripEnforcesIdempotentSettlement ..................   Passed    0.08 sec
+    Start 7: SettlementRepositoryTest.ConcurrentSameRequestReplaysOrRetriesWithoutDuplicateEffects
+7/9 Test #7: SettlementRepositoryTest.ConcurrentSameRequestReplaysOrRetriesWithoutDuplicateEffects ...   Passed    0.07 sec
+    Start 8: SettlementRepositoryTest.CommitAcknowledgementLossIsReportedAsUnknown
+8/9 Test #8: SettlementRepositoryTest.CommitAcknowledgementLossIsReportedAsUnknown ...................   Passed    0.06 sec
+    Start 9: SettlementRepositoryTest.SettlementResultPersistsAcrossProcessRestart
+9/9 Test #9: SettlementRepositoryTest.SettlementResultPersistsAcrossProcessRestart ...................   Passed    0.09 sec
+
+100% tests passed, 0 tests failed out of 9
+
+Total Test time (real) =   0.38 sec
