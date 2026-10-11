@@ -1,6 +1,7 @@
 #include "storage/mysql_RAII.h"
 #include "storage/settlement_repository.h"
 
+#include <errmsg.h>
 #include <gtest/gtest.h>
 #include <mysql.h>
 
@@ -12,7 +13,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 
 namespace
 {
@@ -73,6 +76,69 @@ namespace
         std::uint64_t winner_player_id_;
         std::uint64_t loser_player_id_;
     };
+}
+
+namespace
+{
+
+int run_settlement_in_fresh_process(const ReportMatchResultRequest &request, SettlementStates expected_state, const char *password, const char *database_name)
+{
+    if (mysql_thread_init() != 0)
+    {
+        return 1;
+    }
+
+    int exit_code = 0;
+    MYSQL *raw = mysql_init(nullptr);
+
+    if (raw == nullptr)
+    {
+        mysql_thread_end();
+        return 2;
+    }
+
+    unsigned int timeout_seconds = 5U;
+
+    if (mysql_options(raw, MYSQL_OPT_CONNECT_TIMEOUT, &timeout_seconds) != 0)
+    {
+        exit_code = 3;
+    }
+    else if (mysql_real_connect(raw, "127.0.0.1", "p2", password, database_name, 13306U, nullptr, 0) == nullptr)
+    {
+        exit_code = 4;
+    }
+    else
+    {
+        SettlementRepository repository(raw);
+        const auto result = repository.report_match_result(request);
+
+        if (result.state != expected_state)
+        {
+            exit_code = 5;
+        }
+        else if (!result.settlement.has_value())
+        {
+            exit_code = 6;
+        }
+        else
+        {
+            const MatchSettlement &settlement = *result.settlement;
+
+            if (settlement.request_id != request.request_id ||
+                settlement.match_id != request.match_id ||
+                settlement.winner_player_id != request.winner_player_id ||
+                settlement.loser_player_id != request.loser_player_id)
+            {
+                exit_code = 7;
+            }
+        }
+    }
+
+    mysql_close(raw);
+    mysql_thread_end();
+    return exit_code;
+}
+
 }
 
 TEST(SettlementRepositoryTest, NullConnection)
@@ -471,6 +537,59 @@ TEST(SettlementRepositoryTest, ConcurrentSameRequestReplaysOrRetriesWithoutDupli
     const ReportMatchResultRequest request{result_request_id, match_id, winner_player_id, loser_player_id};
     const ReportMatchResultRequest competing_request = request;
 
+    // 先验证两个故障位置，再继续原来的同 ID 并发重试。
+    const std::string rollback_verify_sql =
+        "SELECT m.state, (m.completed_at IS NOT NULL), "
+        "winner.win_count, winner.loss_count, loser.win_count, loser.loss_count, "
+        "(winner_match.outcome IS NULL), (loser_match.outcome IS NULL), "
+        "(SELECT COUNT(*) FROM active_assignments WHERE match_id = m.match_id), "
+        "(SELECT COUNT(*) FROM result_requests WHERE match_id = m.match_id) "
+        "FROM matches AS m "
+        "JOIN players AS winner ON winner.player_id = " + std::to_string(winner_player_id) + " "
+        "JOIN players AS loser ON loser.player_id = " + std::to_string(loser_player_id) + " "
+        "JOIN match_players AS winner_match ON winner_match.match_id = m.match_id AND winner_match.player_id = winner.player_id "
+        "JOIN match_players AS loser_match ON loser_match.match_id = m.match_id AND loser_match.player_id = loser.player_id "
+        "WHERE m.match_id = '" + match_id + "'";
+
+    const SettlementFaultPoint fault_points[] = {SettlementFaultPoint::AfterWinnerIncrement, SettlementFaultPoint::BeforeCommit};
+    const char *expected_fields[] = {"0", "0", "0", "0", "0", "0", "1", "1", "2", "0"};
+
+    for (const SettlementFaultPoint fault_point : fault_points)
+    {
+        SCOPED_TRACE(static_cast<int>(fault_point));
+
+        const auto failed_result = repository.report_match_result(request, fault_point);
+        ASSERT_EQ(failed_result.state, SettlementStates::SqlError) << failed_result.error.message;
+        ASSERT_FALSE(failed_result.settlement.has_value());
+        EXPECT_EQ(failed_result.error.code, 0U);
+
+        const char *expected_message = fault_point == SettlementFaultPoint::AfterWinnerIncrement
+            ? "injected failure after winner update" : "injected failure before commit";
+        EXPECT_EQ(failed_result.error.message, expected_message);
+
+        // 检查原连接收到回滚确认后，已经结束事务。
+        ASSERT_EQ(raw->server_status & SERVER_STATUS_IN_TRANS, 0U);
+
+        // 使用第二条连接检查数据库事实。
+        ASSERT_EQ(mysql_query(second_raw, rollback_verify_sql.c_str()), 0) << mysql_error(second_raw);
+
+        using RollbackResultPtr = std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)>;
+        RollbackResultPtr rollback_result(mysql_store_result(second_raw), &mysql_free_result);
+
+        ASSERT_NE(rollback_result.get(), nullptr) << mysql_error(second_raw);
+        ASSERT_EQ(mysql_num_fields(rollback_result.get()), 10U);
+        ASSERT_EQ(mysql_num_rows(rollback_result.get()), 1U);
+
+        MYSQL_ROW rollback_row = mysql_fetch_row(rollback_result.get());
+        ASSERT_NE(rollback_row, nullptr);
+
+        for (std::size_t index = 0; index < 10U; ++index)
+        {
+            ASSERT_NE(rollback_row[index], nullptr);
+            EXPECT_STREQ(rollback_row[index], expected_fields[index]) << "column=" << index;
+        }
+    }
+
     ReportMatchResultResult first_result;
     ReportMatchResultResult second_result;
     int first_thread_init = 1;
@@ -657,6 +776,167 @@ TEST(SettlementRepositoryTest, ConcurrentSameRequestReplaysOrRetriesWithoutDupli
         std::to_string(loser_player_id).c_str());
 }
 
+TEST(SettlementRepositoryTest, CommitAcknowledgementLossIsReportedAsUnknown)
+{
+    const char *password = std::getenv("DB_PASSWORD");
+    ASSERT_NE(password, nullptr);
+    ASSERT_NE(password[0], '\0');
+
+    const char *database_name = std::getenv("DB_NAME");
+    if (database_name == nullptr || database_name[0] == '\0')
+    {
+        database_name = "online_game_backend";
+    }
+
+    MYSQL *raw = mysql_init(nullptr);
+    ASSERT_NE(raw, nullptr);
+    MysqlConnection connection(raw);
+
+    MYSQL *observer_raw = mysql_init(nullptr);
+    ASSERT_NE(observer_raw, nullptr);
+    MysqlConnection observer_connection(observer_raw);
+
+    unsigned int timeout_seconds = 5U;
+    MYSQL *connections[] = {raw, observer_raw};
+
+    for (MYSQL *current : connections)
+    {
+        ASSERT_EQ(mysql_options(current, MYSQL_OPT_CONNECT_TIMEOUT, &timeout_seconds), 0);
+        ASSERT_NE(mysql_real_connect(current, "127.0.0.1", "p2", password, database_name, 13306U, nullptr, 0), nullptr) << mysql_error(current);
+    }
+
+    const std::uint64_t seed = static_cast<std::uint64_t>(std::chrono::system_clock::now().time_since_epoch().count());
+    const std::uint64_t winner_player_id = seed;
+    const std::uint64_t loser_player_id = seed + 1U;
+    const std::string suffix = std::to_string(seed);
+
+    const std::string match_id = "D6-ACK-M-" + suffix;
+    const std::string create_request_id = "D6-ACK-C-" + suffix;
+    const std::string result_request_id = "D6-ACK-R-" + suffix;
+
+    SettlementRowsCleanup cleanup(raw, match_id, winner_player_id, loser_player_id);
+
+    std::string sql = "INSERT INTO players (player_id) VALUES (" + std::to_string(winner_player_id) + "), (" + std::to_string(loser_player_id) + ")";
+    ASSERT_EQ(mysql_query(raw, sql.c_str()), 0) << mysql_error(raw);
+
+    sql = "INSERT INTO matches (match_id, create_request_id, state) VALUES ('" + match_id + "', '" + create_request_id + "', 0)";
+    ASSERT_EQ(mysql_query(raw, sql.c_str()), 0) << mysql_error(raw);
+
+    sql = "INSERT INTO match_players (match_id, player_id) VALUES ('" + match_id + "', " + std::to_string(winner_player_id) + "), ('" + match_id + "', " + std::to_string(loser_player_id) + ")";
+    ASSERT_EQ(mysql_query(raw, sql.c_str()), 0) << mysql_error(raw);
+
+    sql = "INSERT INTO active_assignments (match_id, player_id) VALUES ('" + match_id + "', " + std::to_string(winner_player_id) + "), ('" + match_id + "', " + std::to_string(loser_player_id) + ")";
+    ASSERT_EQ(mysql_query(raw, sql.c_str()), 0) << mysql_error(raw);
+
+    SettlementRepository repository(raw);
+    const ReportMatchResultRequest request{result_request_id, match_id, winner_player_id, loser_player_id};
+    const auto result = repository.report_match_result(request, SettlementFaultPoint::CommitAckLost);
+
+    // 调用方得到未知结果，不能误报为明确回滚。
+    ASSERT_EQ(result.state, SettlementStates::CommitOutcomeUnknown) << result.error.message;
+    EXPECT_FALSE(result.settlement.has_value());
+    EXPECT_EQ(result.error.code, static_cast<unsigned int>(CR_SERVER_LOST));
+    EXPECT_EQ(result.error.message, "injected commit acknowledgement loss");
+
+    // 从另一条连接观察：全部结算效果实际上已经提交。
+    const std::string verify_sql =
+        "SELECT m.state, (m.completed_at IS NOT NULL), "
+        "winner.win_count, winner.loss_count, loser.win_count, loser.loss_count, "
+        "winner_match.outcome, loser_match.outcome, "
+        "(SELECT COUNT(*) FROM active_assignments WHERE match_id = m.match_id), "
+        "(SELECT COUNT(*) FROM result_requests WHERE match_id = m.match_id) "
+        "FROM matches AS m "
+        "JOIN players AS winner ON winner.player_id = " + std::to_string(winner_player_id) + " "
+        "JOIN players AS loser ON loser.player_id = " + std::to_string(loser_player_id) + " "
+        "JOIN match_players AS winner_match ON winner_match.match_id = m.match_id AND winner_match.player_id = winner.player_id "
+        "JOIN match_players AS loser_match ON loser_match.match_id = m.match_id AND loser_match.player_id = loser.player_id "
+        "WHERE m.match_id = '" + match_id + "'";
+
+    ASSERT_EQ(mysql_query(observer_raw, verify_sql.c_str()), 0) << mysql_error(observer_raw);
+
+    using MysqlResultPtr = std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)>;
+    MysqlResultPtr query_result(mysql_store_result(observer_raw), &mysql_free_result);
+
+    ASSERT_NE(query_result.get(), nullptr) << mysql_error(observer_raw);
+    ASSERT_EQ(mysql_num_fields(query_result.get()), 10U);
+    ASSERT_EQ(mysql_num_rows(query_result.get()), 1U);
+
+    MYSQL_ROW row = mysql_fetch_row(query_result.get());
+    ASSERT_NE(row, nullptr);
+
+    const char *expected_fields[] = {"1", "1", "1", "0", "0", "1", "1", "2", "0", "1"};
+
+    for (std::size_t index = 0; index < 10U; ++index)
+    {
+        ASSERT_NE(row[index], nullptr);
+        EXPECT_STREQ(row[index], expected_fields[index]) << "column=" << index;
+    }
+}
+
+TEST(SettlementRepositoryTest, SettlementResultPersistsAcrossProcessRestart)
+{
+    const char *password = std::getenv("DB_PASSWORD");
+    ASSERT_NE(password, nullptr);
+    ASSERT_NE(password[0], '\0');
+
+    const char *database_name = std::getenv("DB_NAME");
+    if (database_name == nullptr || database_name[0] == '\0')
+    {
+        database_name = "online_game_backend";
+    }
+
+    MYSQL *raw = mysql_init(nullptr);
+    ASSERT_NE(raw, nullptr);
+    MysqlConnection connection(raw);
+
+    unsigned int timeout_seconds = 5U;
+    ASSERT_EQ(mysql_options(raw, MYSQL_OPT_CONNECT_TIMEOUT, &timeout_seconds), 0);
+    ASSERT_NE(mysql_real_connect(raw, "127.0.0.1", "p2", password, database_name, 13306U, nullptr, 0), nullptr) << mysql_error(raw);
+
+    const std::uint64_t seed = static_cast<std::uint64_t>(std::chrono::system_clock::now().time_since_epoch().count());
+    const std::uint64_t winner_player_id = seed;
+    const std::uint64_t loser_player_id = seed + 1U;
+    const std::string suffix = std::to_string(seed);
+
+    const std::string match_id = "D6-RST-M-" + suffix;
+    const std::string create_request_id = "D6-RST-C-" + suffix;
+    const std::string result_request_id = "D6-RST-R-" + suffix;
+
+    SettlementRowsCleanup cleanup(raw, match_id, winner_player_id, loser_player_id);
+
+    std::string sql = "INSERT INTO players (player_id) VALUES (" + std::to_string(winner_player_id) + "), (" + std::to_string(loser_player_id) + ")";
+    ASSERT_EQ(mysql_query(raw, sql.c_str()), 0) << mysql_error(raw);
+
+    sql = "INSERT INTO matches (match_id, create_request_id, state) VALUES ('" + match_id + "', '" + create_request_id + "', 0)";
+    ASSERT_EQ(mysql_query(raw, sql.c_str()), 0) << mysql_error(raw);
+
+    sql = "INSERT INTO match_players (match_id, player_id) VALUES ('" + match_id + "', " + std::to_string(winner_player_id) + "), ('" + match_id + "', " + std::to_string(loser_player_id) + ")";
+    ASSERT_EQ(mysql_query(raw, sql.c_str()), 0) << mysql_error(raw);
+
+    sql = "INSERT INTO active_assignments (match_id, player_id) VALUES ('" + match_id + "', " + std::to_string(winner_player_id) + "), ('" + match_id + "', " + std::to_string(loser_player_id) + ")";
+    ASSERT_EQ(mysql_query(raw, sql.c_str()), 0) << mysql_error(raw);
+
+    const ReportMatchResultRequest request{result_request_id, match_id, winner_player_id, loser_player_id};
+
+    const auto run_process = [&](SettlementStates expected_state)
+    {
+        const pid_t pid = fork();
+        ASSERT_NE(pid, static_cast<pid_t>(-1));
+
+        if (pid == 0)
+        {
+            _exit(run_settlement_in_fresh_process(request, expected_state, password, database_name));
+        }
+
+        int child_status = 0;
+        ASSERT_EQ(waitpid(pid, &child_status, 0), pid);
+        ASSERT_TRUE(WIFEXITED(child_status));
+        ASSERT_EQ(WEXITSTATUS(child_status), 0) << "child exit code=" << WEXITSTATUS(child_status);
+    };
+
+    run_process(SettlementStates::Success);
+    run_process(SettlementStates::Replayed);
+}
 
 int main(int argc, char **argv)
 {

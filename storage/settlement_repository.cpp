@@ -604,16 +604,23 @@ namespace
             return mysql_rollback(connection_) == 0;
         }
 
-        // 先解除析构回滚责任再提交；返回 COMMIT 是否成功。
-        bool commit() noexcept
+        // 返回底层提交状态；开始提交前解除析构回滚责任。
+        StepResult commit(SettlementFaultPoint fault_point)
         {
-            /*
-             * 必须先解除析构回滚责任。
-             * mysql_commit() 返回失败时，可能只是 COMMIT 确认丢失，
-             * 不能再由析构函数补发 ROLLBACK，把未知结果错误地当成回滚。
-             */
             active_ = false;
-            return mysql_commit(connection_) == 0;
+
+            if (mysql_commit(connection_) != 0)
+            {
+                return connection_failure(connection_);
+            }
+
+            // 数据库已经真实提交，但模拟调用方收到断线错误。
+            if (fault_point == SettlementFaultPoint::CommitAckLost)
+            {
+                return {SettlementStates::ConnectionError, {CR_SERVER_LOST, "injected commit acknowledgement loss"}};
+            }
+
+            return {};
         }
     private:
         MYSQL *connection_;
@@ -642,7 +649,7 @@ SettlementRepository::SettlementRepository(MYSQL *connection) noexcept : connect
 }
 
 // 按“校验 -> BEGIN -> 两次请求查询及各项锁定 -> 写入 -> COMMIT/ROLLBACK”实现。
-ReportMatchResultResult SettlementRepository::report_match_result(const ReportMatchResultRequest &request)
+ReportMatchResultResult SettlementRepository::report_match_result(const ReportMatchResultRequest &request, SettlementFaultPoint fault_point)
 {
     if (!is_valid_request(request))
     {
@@ -717,6 +724,10 @@ ReportMatchResultResult SettlementRepository::report_match_result(const ReportMa
     {
         return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
     }
+    if (fault_point == SettlementFaultPoint::AfterWinnerIncrement)
+    {
+        return rollback_and_return(transaction, connection_, {SettlementStates::SqlError, std::nullopt, {0, "injected failure after winner update"}});
+    }
     step = increment_loser(connection_, request.loser_player_id);
     if (!step.ok())
     {
@@ -742,9 +753,14 @@ ReportMatchResultResult SettlementRepository::report_match_result(const ReportMa
     {
         return rollback_and_return(transaction, connection_, {step.state, std::nullopt, step.error});
     }
-    if (!transaction.commit())
+    if (fault_point == SettlementFaultPoint::BeforeCommit)
     {
-        return {SettlementStates::CommitOutcomeUnknown, std::nullopt, {mysql_errno(connection_), mysql_error(connection_)}};
+        return rollback_and_return(transaction, connection_, {SettlementStates::SqlError, std::nullopt, {0, "injected failure before commit"}});
+    }
+    step = transaction.commit(fault_point);
+    if (!step.ok())
+    {
+        return {SettlementStates::CommitOutcomeUnknown, std::nullopt, step.error};
     }
     MatchSettlement settlement{request.request_id, request.match_id, request.winner_player_id, request.loser_player_id};
     return {SettlementStates::Success, settlement, {}};

@@ -21,6 +21,15 @@ enum class SettlementStates
     DataError
 };
 
+// 本次调用的测试故障点，默认关闭。
+enum class SettlementFaultPoint
+{
+    None,
+    AfterWinnerIncrement,
+    BeforeCommit,
+    CommitAckLost
+};
+
 struct SettlementError
 {
     unsigned int code{0};
@@ -65,8 +74,8 @@ public:
     SettlementRepository(SettlementRepository &&) = delete;
     SettlementRepository &operator=(SettlementRepository &&) = delete;
 
-    // 结算入口：在事务内锁定对局并落库全部结算效果，任一步失败回滚。
-    ReportMatchResultResult report_match_result(const ReportMatchResultRequest &request);
+    // 默认正常结算；测试时可指定故障位置。
+    ReportMatchResultResult report_match_result(const ReportMatchResultRequest &request, SettlementFaultPoint fault_point = SettlementFaultPoint::None);
 private:
     MYSQL *connection_;
 };
