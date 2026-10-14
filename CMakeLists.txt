@@ -14,6 +14,10 @@ find_path(MYSQL_INCLUDE_DIR NAMES mysql.h PATH_SUFFIXES mysql REQUIRED)
 
 find_library(MYSQLCLIENT_LIBRARY NAMES mysqlclient REQUIRED)
 
+find_package(PkgConfig REQUIRED)
+
+pkg_check_modules(HIREDIS REQUIRED IMPORTED_TARGET hiredis)
+
 add_library(online_game_backend_mysql INTERFACE)
 
 target_include_directories(online_game_backend_mysql SYSTEM INTERFACE "${MYSQL_INCLUDE_DIR}")
@@ -23,6 +27,7 @@ target_link_libraries(online_game_backend_mysql INTERFACE "${MYSQLCLIENT_LIBRARY
 add_library(online_game_backend_storage STATIC
     storage/mysql_RAII.cpp
     storage/player_repository.cpp
+    storage/redis_client.cpp
     storage/settlement_repository.cpp
 )
 
@@ -34,6 +39,7 @@ target_include_directories(online_game_backend_storage
 target_link_libraries(online_game_backend_storage
     PUBLIC
         online_game_backend_mysql
+        PkgConfig::HIREDIS
     PRIVATE
         online_game_backend_project_options
 )
@@ -76,6 +82,22 @@ if(BUILD_TESTING)
             GTest::gtest
     )
     gtest_discover_tests(online_game_backend_player_repository_test)
+
+    add_executable(online_game_backend_redis_client_test
+        tests/redis_client_test.cpp
+    )
+
+    target_link_libraries(
+        online_game_backend_redis_client_test
+        PRIVATE
+            online_game_backend_project_options
+            online_game_backend_storage
+            GTest::gtest_main
+    )
+
+    gtest_discover_tests(
+        online_game_backend_redis_client_test
+    )
 
     add_executable(online_game_backend_settlement_repository_test
         tests/settlement_repository_test.cpp
